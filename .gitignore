@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+
+# Search output files (may contain survey content)
+search-results.json
+search-results.csv

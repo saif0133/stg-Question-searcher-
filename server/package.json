@@ -1,0 +1,20 @@
+{
+  "name": "survey-question-search-server",
+  "version": "1.0.0",
+  "description": "Fastify backend that searches questions across SurveyToGo customers, projects and surveys.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "cli": "node src/cli.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "axios": "^1.18.1",
+    "fast-xml-parser": "^5.10.1",
+    "fastify": "^5.2.0"
+  }
+}
