@@ -1,16 +1,26 @@
 {
   "name": "survey-question-search",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Unified full-stack SurveyToGo question search (Fastify serves the API and the built React app).",
+  "main": "search.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "install:all": "npm install --prefix server && npm install --prefix web",
+    "build": "npm run build --prefix web",
+    "start": "npm start --prefix server",
+    "dev": "concurrently -n server,web -c blue,green \"npm run dev --prefix server\" \"npm run dev --prefix web\"",
+    "cli": "npm run cli --prefix server"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "axios": "^1.18.1",
     "fast-xml-parser": "^5.10.1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
   }
 }
