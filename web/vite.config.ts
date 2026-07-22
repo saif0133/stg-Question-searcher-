@@ -1,27 +1,15 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// In production the SAME Fastify server serves this built app and the API,
-// so the frontend always uses relative URLs ("/api/...", "/health") and never
-// an external backend domain.
+// The frontend always uses relative "/api/..." URLs (same origin as the site).
 //
-// In development Vite serves the app and proxies "/api" and "/health" to the
-// local Fastify server, so the browser still only talks to one origin and no
-// CORS is involved. Streaming (NDJSON from /api/search/stream) passes through
-// the proxy unbuffered.
+// In production, Netlify rewrites /api/* to serverless functions.
+// In development, run `netlify dev` from the repo root: it starts this Vite
+// server (targetPort 5173), runs the functions, and applies the /api rewrite
+// on one origin (http://localhost:8888) — so no proxy and no CORS are needed.
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    proxy: {
-      "/api": {
-        target: "http://localhost:3000",
-        changeOrigin: true,
-      },
-      "/health": {
-        target: "http://localhost:3000",
-        changeOrigin: true,
-      },
-    },
   },
 });

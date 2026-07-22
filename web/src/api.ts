@@ -9,54 +9,65 @@ import type {
 } from "./types";
 
 /*
- The NDJSON events the backend streams from POST /api/search/stream.
- Each line of the response is exactly one of these objects.
-*/
-type StreamEvent =
-  | ({ type: "progress" } & SearchProgress)
-  | { type: "result"; result: SearchResult }
-  | {
-      type: "done";
-      cancelled: boolean;
-      totalMatches: number;
-      totalErrors: number;
-      errors: SearchError[];
-    }
-  | { type: "error"; error: string; message: string };
-
-/*
  A small typed error we can inspect in the UI.
  The message is safe to show to the user; it never contains credentials.
 */
 export class SurveyApiError extends Error {
   code: string;
+  status: number | null;
 
-  constructor(code: string, message: string) {
+  constructor(code: string, message: string, status: number | null = null) {
     super(message);
     this.code = code;
+    this.status = status;
   }
 }
 
-async function readApiError(response: Response): Promise<never> {
-  let body: Partial<ApiError> = {};
+function isAbortError(error: unknown): boolean {
+  return (error as { name?: string } | null)?.name === "AbortError";
+}
+
+/*
+ POST JSON to a same-origin /api endpoint and return the parsed JSON.
+ On failure it throws a SurveyApiError carrying the HTTP status.
+*/
+async function postJson<T>(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal
+): Promise<T> {
+  let response: Response;
 
   try {
-    body = (await response.json()) as ApiError;
-  } catch {
-    // response had no JSON body
-  }
-
-  if (response.status === 401 || response.status === 403) {
+    response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
     throw new SurveyApiError(
-      body.error || "invalid_credentials",
-      body.message || "Invalid SurveyToGo username or password."
+      "network_error",
+      "Unable to connect to the server. Please try again."
     );
   }
 
-  throw new SurveyApiError(
-    body.error || "request_failed",
-    body.message || `Request failed (status ${response.status}).`
-  );
+  if (!response.ok) {
+    let data: Partial<ApiError> = {};
+    try {
+      data = (await response.json()) as ApiError;
+    } catch {
+      // no JSON body
+    }
+    throw new SurveyApiError(
+      data.error || "request_failed",
+      data.message || `Request failed (status ${response.status}).`,
+      response.status
+    );
+  }
+
+  return (await response.json()) as T;
 }
 
 /*
@@ -66,176 +77,203 @@ async function readApiError(response: Response): Promise<never> {
 export async function fetchCustomers(
   credentials: Credentials
 ): Promise<Customer[]> {
-  let response: Response;
-
-  try {
-    response = await fetch("/api/customers", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(credentials),
-    });
-  } catch {
-    throw new SurveyApiError(
-      "network_error",
-      "Unable to connect to the server. Please try again."
-    );
-  }
-
-  if (!response.ok) {
-    await readApiError(response);
-  }
-
-  const data = (await response.json()) as { customers: Customer[] };
+  const data = await postJson<{ customers: Customer[] }>(
+    "/api/customers",
+    credentials
+  );
   return data.customers;
 }
 
-interface StreamHandlers {
+interface SearchHandlers {
   onProgress: (progress: SearchProgress) => void;
   signal: AbortSignal;
 }
 
+type NamedItem = { id: string; name: string };
+
+function statusOf(error: unknown): number | null {
+  return error instanceof SurveyApiError ? error.status : null;
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /*
- POST /api/search/stream
- Streams NDJSON progress lines, then resolves with the final outcome.
- Credentials travel only inside the POST body.
+ Runs the whole search from the browser as a sequence of short requests:
+ for each selected customer -> its projects -> each project's surveys ->
+ search each survey. This keeps every backend call well within a serverless
+ function's time limit (Netlify), while preserving the exact matching logic.
+
+ Because each request already waits the SurveyToGo rate-limit delay before
+ calling the API, awaiting them sequentially keeps us under 2 requests/second
+ without any extra client-side delay.
+
+ Progress is reported per customer/project/survey, cancellation is honoured
+ between every step, and partial results are returned if cancelled.
 */
-export async function streamSearch(
+export async function executeSearch(
   credentials: Credentials,
   searchText: string,
-  customerIds: string[],
-  handlers: StreamHandlers
+  customers: Customer[],
+  handlers: SearchHandlers
 ): Promise<SearchOutcome> {
-  let response: Response;
+  const { onProgress, signal } = handlers;
+
+  const results: SearchResult[] = [];
+  const errors: SearchError[] = [];
+  const seen = new Set<string>();
+  let cancelled = false;
+
+  const stopIfCancelled = () => {
+    if (signal.aborted) {
+      cancelled = true;
+      throw new DOMException("Aborted", "AbortError");
+    }
+  };
 
   try {
-    response = await fetch("/api/search/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...credentials,
-        searchText,
-        customerIds,
-      }),
-      signal: handlers.signal,
-    });
+    for (let ci = 0; ci < customers.length; ci += 1) {
+      stopIfCancelled();
+      const customer = customers[ci];
+
+      onProgress({
+        phase: "customer",
+        customerName: customer.name,
+        customerIndex: ci + 1,
+        customerTotal: customers.length,
+      });
+
+      let projects: NamedItem[];
+      try {
+        const data = await postJson<{ projects: NamedItem[] }>(
+          "/api/projects",
+          { ...credentials, customerId: customer.id },
+          signal
+        );
+        projects = data.projects;
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        errors.push({
+          level: "customer",
+          customerId: customer.id,
+          customerName: customer.name,
+          status: statusOf(error),
+          error: messageOf(error),
+        });
+        continue;
+      }
+
+      for (let pi = 0; pi < projects.length; pi += 1) {
+        stopIfCancelled();
+        const project = projects[pi];
+
+        onProgress({
+          phase: "project",
+          customerName: customer.name,
+          customerIndex: ci + 1,
+          customerTotal: customers.length,
+          projectName: project.name,
+          projectIndex: pi + 1,
+          projectTotal: projects.length,
+        });
+
+        let surveys: NamedItem[];
+        try {
+          const data = await postJson<{ surveys: NamedItem[] }>(
+            "/api/surveys",
+            { ...credentials, projectId: project.id },
+            signal
+          );
+          surveys = data.surveys;
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          errors.push({
+            level: "project",
+            customerId: customer.id,
+            customerName: customer.name,
+            projectId: project.id,
+            projectName: project.name,
+            status: statusOf(error),
+            error: messageOf(error),
+          });
+          continue;
+        }
+
+        for (let si = 0; si < surveys.length; si += 1) {
+          stopIfCancelled();
+          const survey = surveys[si];
+
+          onProgress({
+            phase: "survey",
+            customerName: customer.name,
+            customerIndex: ci + 1,
+            customerTotal: customers.length,
+            projectName: project.name,
+            projectIndex: pi + 1,
+            projectTotal: projects.length,
+            surveyName: survey.name,
+            surveyIndex: si + 1,
+            surveyTotal: surveys.length,
+          });
+
+          try {
+            const data = await postJson<{
+              matches: { matchedText: string; structurePath: string }[];
+            }>(
+              "/api/search-survey",
+              { ...credentials, surveyId: survey.id, searchText },
+              signal
+            );
+
+            for (const match of data.matches) {
+              const key = `${survey.id}|${match.matchedText.trim().toLowerCase()}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+
+              results.push({
+                customerId: customer.id,
+                customerName: customer.name,
+                projectId: project.id,
+                projectName: project.name,
+                surveyId: survey.id,
+                surveyName: survey.name,
+                matchedText: match.matchedText,
+                structurePath: match.structurePath,
+              });
+            }
+          } catch (error) {
+            if (isAbortError(error)) throw error;
+            errors.push({
+              level: "survey",
+              customerId: customer.id,
+              customerName: customer.name,
+              projectId: project.id,
+              projectName: project.name,
+              surveyId: survey.id,
+              surveyName: survey.name,
+              status: statusOf(error),
+              error: messageOf(error),
+            });
+          }
+        }
+      }
+    }
   } catch (error) {
-    if ((error as Error).name === "AbortError") throw error;
-    throw new SurveyApiError(
-      "network_error",
-      "Unable to connect to the server. Please try again."
-    );
-  }
-
-  if (!response.ok) {
-    await readApiError(response);
-  }
-
-  if (!response.body) {
-    throw new SurveyApiError("stream_error", "The server returned no data.");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-
-  let buffer = "";
-
-  // Results arrive incrementally as "result" events; the "done" event
-  // carries the final totals, non-fatal errors, and cancel flag.
-  const collectedResults: SearchResult[] = [];
-  let doneEvent: {
-    cancelled: boolean;
-    totalMatches: number;
-    totalErrors: number;
-    errors: SearchError[];
-  } | null = null;
-  let streamError: SurveyApiError | null = null;
-
-  const handleLine = (line: string) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-
-    // A partial/truncated line (e.g. a dropped connection) is ignored so it
-    // cannot crash the reader; a missing terminal event is handled below.
-    let payload: StreamEvent;
-    try {
-      payload = JSON.parse(trimmed) as StreamEvent;
-    } catch {
-      return;
+    if (isAbortError(error)) {
+      cancelled = true;
+    } else {
+      throw error;
     }
+  }
 
-    switch (payload.type) {
-      case "progress":
-        handlers.onProgress(payload);
-        break;
-      case "result":
-        collectedResults.push(payload.result);
-        break;
-      case "done":
-        doneEvent = {
-          cancelled: payload.cancelled,
-          totalMatches: payload.totalMatches,
-          totalErrors: payload.totalErrors,
-          errors: payload.errors,
-        };
-        break;
-      case "error":
-        streamError = new SurveyApiError(payload.error, payload.message);
-        break;
-      default:
-        break;
-    }
+  return {
+    cancelled,
+    totalMatches: results.length,
+    totalErrors: errors.length,
+    results,
+    errors,
   };
-
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-
-    // A chunk may contain several lines, or split a single line across reads;
-    // we only process a line once its trailing "\n" has arrived.
-    buffer += decoder.decode(value, { stream: true });
-
-    let newlineIndex = buffer.indexOf("\n");
-    while (newlineIndex !== -1) {
-      const line = buffer.slice(0, newlineIndex);
-      buffer = buffer.slice(newlineIndex + 1);
-      handleLine(line);
-      newlineIndex = buffer.indexOf("\n");
-    }
-  }
-
-  // Flush any complete final line that arrived without a trailing newline.
-  buffer += decoder.decode();
-  if (buffer.trim()) {
-    handleLine(buffer);
-  }
-
-  // An explicit error event always wins.
-  if (streamError) {
-    throw streamError;
-  }
-
-  // Only when the connection closed with neither a "done" nor an "error".
-  if (!doneEvent) {
-    throw new SurveyApiError("stream_error", "Search stream ended unexpectedly.");
-  }
-
-  const finished: {
-    cancelled: boolean;
-    totalMatches: number;
-    totalErrors: number;
-    errors: SearchError[];
-  } = doneEvent;
-
-  const outcome: SearchOutcome = {
-    cancelled: finished.cancelled,
-    totalMatches: finished.totalMatches,
-    totalErrors: finished.totalErrors,
-    results: collectedResults,
-    errors: finished.errors,
-  };
-
-  return outcome;
 }
 
 /*

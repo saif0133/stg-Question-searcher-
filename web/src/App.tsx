@@ -4,7 +4,7 @@ import { CustomerSelect } from "./components/CustomerSelect";
 import { SearchPanel } from "./components/SearchPanel";
 import { ResultsTable } from "./components/ResultsTable";
 import { Button } from "./components/ui";
-import { streamSearch, SurveyApiError } from "./api";
+import { executeSearch, SurveyApiError } from "./api";
 import type {
   Credentials,
   Customer,
@@ -61,17 +61,23 @@ export function App() {
 
     const searchTextUsed = searchText.trim();
 
+    // The browser drives the search across the selected customers, so we pass
+    // the full customer objects (id + name) it already has.
+    const selectedCustomers = customers.filter((c) => selectedIds.has(c.id));
+
     try {
-      const outcome = await streamSearch(
+      const outcome = await executeSearch(
         credentials,
         searchTextUsed,
-        [...selectedIds],
+        selectedCustomers,
         {
           onProgress: setProgress,
           signal: controller.signal,
         }
       );
 
+      // executeSearch returns partial results with cancelled=true if the user
+      // cancelled, so the success path always has something to show.
       setSearch({
         ran: true,
         results: outcome.results,
@@ -80,10 +86,7 @@ export function App() {
         searchTextUsed,
       });
     } catch (err) {
-      if ((err as Error).name === "AbortError") {
-        // Cancelled by the user; keep whatever was already shown.
-        setSearch((prev) => ({ ...prev, cancelled: prev.ran }));
-      } else if (err instanceof SurveyApiError) {
+      if (err instanceof SurveyApiError) {
         setSearchError(err.message);
       } else {
         setSearchError("The search failed. Please try again.");

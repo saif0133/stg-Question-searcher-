@@ -775,6 +775,74 @@ async function searchSelectedCustomers({
   };
 }
 
+/* =========================================================
+   خطوات مفردة (لتشغيل serverless مثل Netlify Functions)
+
+   كل دالة تُنشئ عميل Axios من بيانات الدخول المستلمة وتنفّذ خطوة
+   واحدة قصيرة تناسب مهلة الدوال بلا حالة. المنطق نفسه غير متغيّر
+   (نفس المسارات، نفس التحليل، نفس المطابقة، نفس إزالة التكرار).
+========================================================= */
+
+async function listCustomerProjects({ username, password, customerId }) {
+  const client = createApiClient(username, password);
+
+  const projects = await getCustomerProjects(client, customerId);
+
+  return projects
+    .map((project, index) => {
+      const id = getProjectId(project);
+
+      return {
+        id: id === undefined || id === null ? null : String(id),
+        name: getName(project, `Project ${index + 1}`),
+      };
+    })
+    .filter((project) => project.id !== null);
+}
+
+async function listProjectSurveys({ username, password, projectId }) {
+  const client = createApiClient(username, password);
+
+  const surveys = await getProjectSurveys(client, projectId);
+
+  return surveys
+    .map((survey, index) => {
+      const id = getSurveyId(survey);
+
+      return {
+        id: id === undefined || id === null ? null : String(id),
+        name: getName(survey, `Survey ${index + 1}`),
+      };
+    })
+    .filter((survey) => survey.id !== null);
+}
+
+async function searchSurvey({ username, password, surveyId, searchText }) {
+  const client = createApiClient(username, password);
+
+  const structure = await getSurveyStructure(client, surveyId);
+
+  const matches = findMatches(structure, searchText);
+
+  // إزالة التكرار داخل الاستمارة الواحدة (نفس مفتاح removeDuplicateMatches)
+  const seen = new Set();
+  const unique = [];
+
+  for (const match of matches) {
+    const key = normalizeText(match.text);
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push({
+        matchedText: match.text,
+        structurePath: match.path,
+      });
+    }
+  }
+
+  return unique;
+}
+
 module.exports = {
   CONFIG,
   createApiClient,
@@ -788,5 +856,8 @@ module.exports = {
   getCustomerId,
   getName,
   listCustomers,
+  listCustomerProjects,
+  listProjectSurveys,
+  searchSurvey,
   searchSelectedCustomers,
 };
