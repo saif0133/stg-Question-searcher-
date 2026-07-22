@@ -1,11 +1,4 @@
-# =========================================================
-# Netlify configuration (single deployment)
-#
-# - Static React app is served from web/dist
-# - The API lives in serverless functions under netlify/functions
-# - /api/* is rewritten to those functions
-# - Everything else falls back to index.html
-# =========================================================
+# Netlify configuration — single site: static React app + serverless API functions
 
 [build]
   command = "npm install --prefix web && npm run build --prefix web"
@@ -30,6 +23,5 @@
 
 [dev]
   command = "npm run dev --prefix web"
-  framework = "vite"
   targetPort = 5173
   port = 8888
